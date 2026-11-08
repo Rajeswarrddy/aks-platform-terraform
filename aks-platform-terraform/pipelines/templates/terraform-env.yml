@@ -1,0 +1,101 @@
+parameters:
+  - name: envName
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: dependsOn
+    type: object
+    default: []
+
+stages:
+  - stage: ${{ parameters.envName }}
+    displayName: Deploy ${{ parameters.envName }}
+    dependsOn: ${{ parameters.dependsOn }}
+    # PRs only get validate; apply runs from main.
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: Plan
+        displayName: Terraform plan (${{ parameters.envName }})
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: Install Terraform
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: AzureCLI@2
+            displayName: terraform init and plan
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              workingDirectory: infra
+              inlineScript: |
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                export ARM_USE_AZUREAD=true
+
+                terraform init -input=false \
+                  -backend-config="resource_group_name=$(tfstateResourceGroup)" \
+                  -backend-config="storage_account_name=$(tfstateStorageAccount)" \
+                  -backend-config="container_name=$(tfstateContainer)" \
+                  -backend-config="key=aks-platform-${{ parameters.envName }}.tfstate"
+
+                terraform plan -input=false \
+                  -var-file=env/${{ parameters.envName }}.tfvars \
+                  -out=tfplan
+
+                terraform show -no-color tfplan > tfplan.txt
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish plan
+            inputs:
+              targetPath: infra/tfplan
+              artifact: tfplan-${{ parameters.envName }}
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish human-readable plan
+            inputs:
+              targetPath: infra/tfplan.txt
+              artifact: tfplan-${{ parameters.envName }}-text
+
+      - deployment: Apply
+        displayName: Terraform apply (${{ parameters.envName }})
+        dependsOn: Plan
+        # The approval check on this Environment pauses the run here.
+        environment: aks-${{ parameters.envName }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: Install Terraform
+                  inputs:
+                    terraformVersion: $(terraformVersion)
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: Download plan
+                  inputs:
+                    artifact: tfplan-${{ parameters.envName }}
+                    path: $(Pipeline.Workspace)/plan
+
+                - task: AzureCLI@2
+                  displayName: terraform apply
+                  inputs:
+                    azureSubscription: ${{ parameters.serviceConnection }}
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    workingDirectory: infra
+                    inlineScript: |
+                      export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                      export ARM_USE_AZUREAD=true
+
+                      terraform init -input=false \
+                        -backend-config="resource_group_name=$(tfstateResourceGroup)" \
+                        -backend-config="storage_account_name=$(tfstateStorageAccount)" \
+                        -backend-config="container_name=$(tfstateContainer)" \
+                        -backend-config="key=aks-platform-${{ parameters.envName }}.tfstate"
+
+                      terraform apply -input=false $(Pipeline.Workspace)/plan/tfplan

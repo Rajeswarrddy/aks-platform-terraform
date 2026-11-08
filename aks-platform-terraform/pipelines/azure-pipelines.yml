@@ -1,0 +1,96 @@
+# Multi-stage pipeline: Validate -> Dev -> Test -> Prod
+# Each environment stage runs `terraform plan`, then pauses at the Azure DevOps
+# Environment approval gate, then runs `terraform apply` on the saved plan.
+#
+# Setup in Azure DevOps:
+#   1. Create an Azure Resource Manager service connection (workload identity
+#      federation recommended) and name it in `serviceConnection` below.
+#   2. Create Environments: aks-dev, aks-test, aks-prod.
+#      Add an "Approvals" check to aks-test and aks-prod.
+#   3. Add the three tfstate* variables printed by scripts/bootstrap-state.sh.
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - infra/*
+      - pipelines/*
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  terraformVersion: '1.9.8'
+  serviceConnection: 'sc-azure-aks-platform'
+  # Define these in a variable group or the pipeline UI (not secrets):
+  #   tfstateResourceGroup, tfstateStorageAccount, tfstateContainer
+
+stages:
+  - stage: Validate
+    displayName: Validate and scan
+    jobs:
+      - job: Validate
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            displayName: Install Terraform
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - script: terraform fmt -check -recursive
+            displayName: terraform fmt
+            workingDirectory: infra
+
+          - script: |
+              terraform init -backend=false -input=false
+              terraform validate
+            displayName: terraform validate
+            workingDirectory: infra
+
+          - script: |
+              curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+              tflint --recursive
+            displayName: tflint
+            workingDirectory: infra
+
+          - script: |
+              python3 -m pip install --user checkov
+              ~/.local/bin/checkov -d infra --framework terraform \
+                --soft-fail \
+                --output cli --output junitxml \
+                --output-file-path console,checkov-results
+            displayName: Checkov security scan (soft-fail)
+
+          - task: PublishTestResults@2
+            displayName: Publish Checkov results
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: 'checkov-results/results_junitxml.xml'
+              testRunTitle: Checkov
+
+  - template: templates/terraform-env.yml
+    parameters:
+      envName: dev
+      serviceConnection: $(serviceConnection)
+      dependsOn: [Validate]
+
+  - template: templates/terraform-env.yml
+    parameters:
+      envName: test
+      serviceConnection: $(serviceConnection)
+      dependsOn: [dev]
+
+  - template: templates/terraform-env.yml
+    parameters:
+      envName: prod
+      serviceConnection: $(serviceConnection)
+      dependsOn: [test]
