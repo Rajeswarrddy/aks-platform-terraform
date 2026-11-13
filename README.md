@@ -260,7 +260,7 @@ This is a solid foundation, intentionally kept simple. Things I would harden for
 
 ## Author
 
-**Your Name**
+**Rajeswar Reddy Pondugula**
 [LinkedIn](www.linkedin.com/in/rajeswarreddy-pondugula) · [GitHub](https://github.com/Rajeswarrddy)
 
 ---
